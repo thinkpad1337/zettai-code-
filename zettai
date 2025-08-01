@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+import os
+import shutil
+import subprocess
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
+                            QPushButton, QCheckBox, QProgressBar, QLabel,
+                            QMessageBox, QTextEdit, QLineEdit, QHBoxLayout)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
+
+class CacheCleanerThread(QThread):
+    update_progress = pyqtSignal(int)
+    update_log = pyqtSignal(str)
+    cleaning_finished = pyqtSignal()
+
+    def __init__(self, clean_pacman, clean_user, root_password=None):
+        super().__init__()
+        self.clean_pacman = clean_pacman
+        self.clean_user = clean_user
+        self.root_password = root_password
+
+    def run(self):
+        try:
+            if self.clean_pacman:
+                self.update_log.emit("🧹 Очистка кеша Pacman...")
+                pacman_cache = "/var/cache/pacman/pkg/"
+                if os.path.exists(pacman_cache):
+                    # Используем sudo с паролем
+                    echo = subprocess.Popen(['echo', self.root_password], stdout=subprocess.PIPE)
+                    subprocess.run(['sudo', '-S', 'rm', '-rf', pacman_cache], stdin=echo.stdout, check=True)
+                    subprocess.run(['sudo', '-S', 'mkdir', '-p', pacman_cache], stdin=echo.stdout, check=True)
+                    self.update_log.emit("✅ Кеш Pacman очищен!")
+                else:
+                    self.update_log.emit("⚠️ Папка /var/cache/pacman/pkg/ не найдена!")
+                self.update_progress.emit(50)
+
+            if self.clean_user:
+                self.update_log.emit("🧹 Очистка кеша пользователя...")
+                user_cache = os.path.expanduser("~/.cache/")
+                if os.path.exists(user_cache):
+                    shutil.rmtree(user_cache)
+                    os.makedirs(user_cache, exist_ok=True)
+                    self.update_log.emit("✅ Кеш пользователя очищен!")
+                else:
+                    self.update_log.emit("⚠️ Папка ~/.cache/ не найдена!")
+                self.update_progress.emit(100)
+
+        except subprocess.CalledProcessError as e:
+            self.update_log.emit(f"❌ Ошибка при выполнении команды: {e}")
+        except Exception as e:
+            self.update_log.emit(f"❌ Неожиданная ошибка: {str(e)}")
+        finally:
+            self.cleaning_finished.emit()
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Zettai Ryouiki Cache Cleaner")
+        self.setFixedSize(500, 450)  # Увеличили высоту для поля пароля
+
+        # Главный виджет
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+
+        # Заголовок
+        title = QLabel("Zettai Ryouiki Cache Cleaner")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        layout.addWidget(title)
+
+        # Поле для пароля root
+        password_layout = QHBoxLayout()
+        password_label = QLabel("Пароль root:")
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        password_layout.addWidget(password_label)
+        password_layout.addWidget(self.password_input)
+        layout.addLayout(password_layout)
+
+        # Информация о размере кеша
+        self.cache_info = QLabel()
+        self.update_cache_size()
+        layout.addWidget(self.cache_info)
+
+        # Чекбоксы
+        self.pacman_check = QCheckBox("Очистить кеш Pacman (/var/cache/pacman/pkg/)")
+        self.pacman_check.setChecked(True)
+        layout.addWidget(self.pacman_check)
+
+        self.user_check = QCheckBox("Очистить кеш пользователя (~/.cache/)")
+        self.user_check.setChecked(True)
+        layout.addWidget(self.user_check)
+
+        # Прогресс-бар
+        self.progress = QProgressBar()
+        layout.addWidget(self.progress)
+
+        # Кнопка очистки
+        self.clean_btn = QPushButton("Очистить выбранное")
+        self.clean_btn.clicked.connect(self.start_cleaning)
+        layout.addWidget(self.clean_btn)
+
+        # Лог
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        layout.addWidget(self.log)
+
+    def update_cache_size(self):
+        """Обновляет информацию о размере кеша"""
+        pacman_size = self.get_folder_size("/var/cache/pacman/pkg/")
+        user_size = self.get_folder_size(os.path.expanduser("~/.cache/"))
+        self.cache_info.setText(
+            f"Текущий размер кеша:\n"
+            f"Pacman: {self.format_size(pacman_size)}\n"
+            f"Пользователя: {self.format_size(user_size)}"
+        )
+
+    def get_folder_size(self, path):
+        """Возвращает размер папки в байтах"""
+        if not os.path.exists(path):
+            return 0
+        total = 0
+        for entry in os.scandir(path):
+            if entry.is_file():
+                total += entry.stat().st_size
+            elif entry.is_dir():
+                total += self.get_folder_size(entry.path)
+        return total
+
+    def format_size(self, size):
+        """Форматирует размер в читаемый вид"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def start_cleaning(self):
+        """Запускает очистку в отдельном потоке"""
+        if not (self.pacman_check.isChecked() or self.user_check.isChecked()):
+            QMessageBox.warning(self, "Ошибка", "Не выбрано ничего для очистки!")
+            return
+
+        if self.pacman_check.isChecked() and not self.password_input.text():
+            QMessageBox.warning(self, "Ошибка", "Введите пароль root для очистки системного кеша!")
+            return
+
+        self.clean_btn.setEnabled(False)
+        self.progress.setValue(0)
+        self.log.clear()
+
+        self.worker = CacheCleanerThread(
+            self.pacman_check.isChecked(),
+            self.user_check.isChecked(),
+            self.password_input.text() if self.pacman_check.isChecked() else None
+        )
+        self.worker.update_progress.connect(self.progress.setValue)
+        self.worker.update_log.connect(self.append_log)
+        self.worker.cleaning_finished.connect(self.cleaning_done)
+        self.worker.start()
+
+    def append_log(self, message):
+        """Добавляет сообщение в лог"""
+        self.log.append(message)
+
+    def cleaning_done(self):
+        """Действия после завершения очистки"""
+        self.clean_btn.setEnabled(True)
+        self.update_cache_size()
+        QMessageBox.information(self, "Готово", "Очистка завершена!")
+
+if __name__ == "__main__":
+    app = QApplication([])
+    window = MainWindow()
+    window.show()
+    app.exec_()
