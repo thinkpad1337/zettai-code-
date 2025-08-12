@@ -3,8 +3,8 @@ import os
 import shutil
 import subprocess
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
-                            QPushButton, QCheckBox, QProgressBar, QLabel,
-                            QMessageBox, QTextEdit, QLineEdit, QHBoxLayout)
+                             QPushButton, QCheckBox, QProgressBar, QLabel,
+                             QMessageBox, QTextEdit)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 
 class CacheCleanerThread(QThread):
@@ -12,11 +12,11 @@ class CacheCleanerThread(QThread):
     update_log = pyqtSignal(str)
     cleaning_finished = pyqtSignal()
 
-    def __init__(self, clean_pacman, clean_user, root_password=None):
+    def __init__(self, clean_pacman, clean_user, clean_logs):
         super().__init__()
         self.clean_pacman = clean_pacman
         self.clean_user = clean_user
-        self.root_password = root_password
+        self.clean_logs = clean_logs
 
     def run(self):
         try:
@@ -24,14 +24,12 @@ class CacheCleanerThread(QThread):
                 self.update_log.emit("🧹 Очистка кеша Pacman...")
                 pacman_cache = "/var/cache/pacman/pkg/"
                 if os.path.exists(pacman_cache):
-                    # Используем sudo с паролем
-                    echo = subprocess.Popen(['echo', self.root_password], stdout=subprocess.PIPE)
-                    subprocess.run(['sudo', '-S', 'rm', '-rf', pacman_cache], stdin=echo.stdout, check=True)
-                    subprocess.run(['sudo', '-S', 'mkdir', '-p', pacman_cache], stdin=echo.stdout, check=True)
+                    subprocess.run(['pkexec', 'rm', '-rf', pacman_cache], check=True)
+                    subprocess.run(['pkexec', 'mkdir', '-p', pacman_cache], check=True)
                     self.update_log.emit("✅ Кеш Pacman очищен!")
                 else:
                     self.update_log.emit("⚠️ Папка /var/cache/pacman/pkg/ не найдена!")
-                self.update_progress.emit(50)
+                self.update_progress.emit(33)
 
             if self.clean_user:
                 self.update_log.emit("🧹 Очистка кеша пользователя...")
@@ -42,6 +40,16 @@ class CacheCleanerThread(QThread):
                     self.update_log.emit("✅ Кеш пользователя очищен!")
                 else:
                     self.update_log.emit("⚠️ Папка ~/.cache/ не найдена!")
+                self.update_progress.emit(66)
+
+            if self.clean_logs:
+                self.update_log.emit("🧹 Очистка системных логов...")
+                log_dir = "/var/log/"
+                if os.path.exists(log_dir):
+                    subprocess.run(['pkexec', 'find', log_dir, '-type', 'f', '-delete'], check=True)
+                    self.update_log.emit("✅ Системные логи очищены!")
+                else:
+                    self.update_log.emit("⚠️ Папка /var/log/ не найдена!")
                 self.update_progress.emit(100)
 
         except subprocess.CalledProcessError as e:
@@ -55,7 +63,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Zettai Ryouiki Cache Cleaner")
-        self.setFixedSize(500, 450)  # Увеличили высоту для поля пароля
+        self.setFixedSize(500, 450)
 
         # Главный виджет
         central_widget = QWidget()
@@ -68,18 +76,8 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
-        # Поле для пароля root
-        password_layout = QHBoxLayout()
-        password_label = QLabel("Пароль root:")
-        self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.Password)
-        password_layout.addWidget(password_label)
-        password_layout.addWidget(self.password_input)
-        layout.addLayout(password_layout)
-
         # Информация о размере кеша
         self.cache_info = QLabel()
-        self.update_cache_size()
         layout.addWidget(self.cache_info)
 
         # Чекбоксы
@@ -90,6 +88,10 @@ class MainWindow(QMainWindow):
         self.user_check = QCheckBox("Очистить кеш пользователя (~/.cache/)")
         self.user_check.setChecked(True)
         layout.addWidget(self.user_check)
+
+        self.logs_check = QCheckBox("Очистить системные логи (/var/log/)")
+        self.logs_check.setChecked(True)
+        layout.addWidget(self.logs_check)
 
         # Прогресс-бар
         self.progress = QProgressBar()
@@ -105,14 +107,19 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         layout.addWidget(self.log)
 
+        # Обновляем размер кеша после инициализации всех виджетов
+        self.update_cache_size()
+
     def update_cache_size(self):
-        """Обновляет информацию о размере кеша"""
+        """Обновляет информацию о размере кеша и логов"""
         pacman_size = self.get_folder_size("/var/cache/pacman/pkg/")
         user_size = self.get_folder_size(os.path.expanduser("~/.cache/"))
+        log_size = self.get_folder_size("/var/log/")
         self.cache_info.setText(
-            f"Текущий размер кеша:\n"
+            f"Текущий размер:\n"
             f"Pacman: {self.format_size(pacman_size)}\n"
-            f"Пользователя: {self.format_size(user_size)}"
+            f"Пользователя: {self.format_size(user_size)}\n"
+            f"Логи: {self.format_size(log_size)}"
         )
 
     def get_folder_size(self, path):
@@ -120,11 +127,22 @@ class MainWindow(QMainWindow):
         if not os.path.exists(path):
             return 0
         total = 0
-        for entry in os.scandir(path):
-            if entry.is_file():
-                total += entry.stat().st_size
-            elif entry.is_dir():
-                total += self.get_folder_size(entry.path)
+        try:
+            for entry in os.scandir(path):
+                try:
+                    if entry.is_file():
+                        total += entry.stat().st_size
+                    elif entry.is_dir():
+                        if entry.name.startswith('download-'):
+                            self.safe_log(f"Пропускаем временную папку: {entry.path}")
+                            continue
+                        total += self.get_folder_size(entry.path)
+                except PermissionError:
+                    self.safe_log(f"Отказано в доступе: {entry.path}, пропускаем...")
+                    continue
+        except PermissionError:
+            self.safe_log(f"Отказано в доступе к директории: {path}, пропускаем...")
+            return 0
         return total
 
     def format_size(self, size):
@@ -135,14 +153,21 @@ class MainWindow(QMainWindow):
             size /= 1024
         return f"{size:.1f} TB"
 
+    def safe_log(self, message):
+        """Безопасно логирует сообщения, используя консоль, если self.log недоступен"""
+        if hasattr(self, 'log') and self.log is not None:
+            self.append_log(message)
+        else:
+            print(message)
+
+    def append_log(self, message):
+        """Добавляет сообщение в лог"""
+        self.log.append(message)
+
     def start_cleaning(self):
         """Запускает очистку в отдельном потоке"""
-        if not (self.pacman_check.isChecked() or self.user_check.isChecked()):
+        if not (self.pacman_check.isChecked() or self.user_check.isChecked() or self.logs_check.isChecked()):
             QMessageBox.warning(self, "Ошибка", "Не выбрано ничего для очистки!")
-            return
-
-        if self.pacman_check.isChecked() and not self.password_input.text():
-            QMessageBox.warning(self, "Ошибка", "Введите пароль root для очистки системного кеша!")
             return
 
         self.clean_btn.setEnabled(False)
@@ -152,16 +177,12 @@ class MainWindow(QMainWindow):
         self.worker = CacheCleanerThread(
             self.pacman_check.isChecked(),
             self.user_check.isChecked(),
-            self.password_input.text() if self.pacman_check.isChecked() else None
+            self.logs_check.isChecked()
         )
         self.worker.update_progress.connect(self.progress.setValue)
         self.worker.update_log.connect(self.append_log)
         self.worker.cleaning_finished.connect(self.cleaning_done)
         self.worker.start()
-
-    def append_log(self, message):
-        """Добавляет сообщение в лог"""
-        self.log.append(message)
 
     def cleaning_done(self):
         """Действия после завершения очистки"""
